@@ -1,0 +1,71 @@
+body {
+  background: linear-gradient(120deg, #e0e7ff 0%, #f7fafc 100%);
+  font-family: 'Segoe UI', Arial, sans-serif;
+  margin: 0;
+  padding: 0;
+}
+.container {
+  max-width: 600px;
+  margin: 3em auto;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 4px 24px #0002;
+  padding: 2em 2.5em;
+}
+header h1 {
+  color: #2563eb;
+  margin-bottom: 1.5em;
+  text-align: center;
+}
+section {
+  margin-bottom: 2em;
+}
+label {
+  display: block;
+  margin-bottom: 1em;
+  color: #374151;
+}
+input[type="text"], input[type="number"], select {
+  width: 100%;
+  padding: 0.6em;
+  margin-top: 0.3em;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 1em;
+  background: #f1f5f9;
+}
+button {
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 0.7em 2em;
+  font-size: 1em;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+button:hover {
+  background: #1e40af;
+}
+pre {
+  background: #f1f5f9;
+  border-radius: 6px;
+  padding: 1em;
+  font-size: 0.95em;
+  max-height: 200px;
+  overflow-y: auto;
+  color: #334155;
+}
+#config-status {
+  margin-top: 1em;
+  color: #059669;
+}
+#test-result {
+  margin-left: 1em;
+  font-weight: bold;
+}
+@media (max-width: 700px) {
+  .container {
+    padding: 1em 0.5em;
+  }
+} 

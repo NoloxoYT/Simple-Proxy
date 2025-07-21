@@ -1,0 +1,16 @@
+{
+  "name": "codespace-proxy",
+  "version": "1.0.0",
+  "main": "index.js",
+  "description": "Proxy HTTP/HTTPS/WebSocket compatible GitHub Codespaces.",
+  "scripts": {
+    "start": "node index.js",
+    "build": "echo 'No build needed'"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "dependencies": {
+    "http-proxy": "^1.18.1"
+  }
+} 

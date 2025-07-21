@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Proxy Dashboard Avancé</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="/public/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Proxy Dashboard Avancé</h1>
+    </header>
+    <section id="config-section">
+      <h2>Configuration actuelle</h2>
+      <form id="config-form">
+        <label>Cible du proxy
+          <input type="text" id="target" name="target" required />
+        </label>
+        <label>Port d'écoute
+          <input type="number" id="port" name="port" min="1" max="65535" required />
+        </label>
+        <label>HTTPS
+          <select id="https" name="https">
+            <option value="false">Non</option>
+            <option value="true">Oui</option>
+          </select>
+        </label>
+        <button type="submit">Mettre à jour</button>
+      </form>
+      <div id="config-status"></div>
+    </section>
+    <section id="logs-section">
+      <h2>Logs récents</h2>
+      <pre id="logs"></pre>
+    </section>
+    <section id="actions-section">
+      <h2>Actions</h2>
+      <button id="test-conn">Tester la cible</button>
+      <span id="test-result"></span>
+    </section>
+  </div>
+  <script src="/public/app.js"></script>
+</body>
+</html> 
