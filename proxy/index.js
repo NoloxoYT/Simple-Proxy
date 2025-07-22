@@ -16,9 +16,9 @@ function log(msg) {
   console.log(line);
 }
 
-const PORT = process.env.PORT || process.env.PROXY_PORT || 8080;
-const TARGET = process.env.PROXY_TARGET || 'http://localhost:3000';
-const USE_HTTPS = process.env.PROXY_HTTPS === '1' || process.env.PROXY_HTTPS === 'true';
+let PORT = process.env.PORT || process.env.PROXY_PORT || 8080;
+let TARGET = process.env.PROXY_TARGET || 'http://localhost:3000';
+let USE_HTTPS = process.env.PROXY_HTTPS === '1' || process.env.PROXY_HTTPS === 'true';
 
 const proxy = httpProxy.createProxyServer({
   target: TARGET,
@@ -112,17 +112,22 @@ const requestHandler = (req, res) => {
       let body = '';
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
+        let data;
         try {
-          const data = JSON.parse(body);
-          if (data.target) TARGET = data.target;
-          if (data.port) PORT = data.port;
-          if (typeof data.https === 'boolean') USE_HTTPS = data.https;
-          proxy.options.target = TARGET;
-          log(`Config changée: target=${TARGET}, port=${PORT}, https=${USE_HTTPS}`);
-          res.writeHead(200); res.end('Configuration mise à jour (le port/https nécessite un redémarrage manuel)');
+          // Essayer de parser en JSON
+          data = JSON.parse(body);
         } catch (e) {
-          res.writeHead(400); res.end('Erreur de parsing');
+          // Fallback: parser en x-www-form-urlencoded
+          data = querystring.parse(body);
         }
+        if (data.target) TARGET = data.target;
+        if (data.port) PORT = data.port;
+        if (typeof data.https === 'boolean' || data.https === 'true' || data.https === 'false') {
+          USE_HTTPS = (data.https === true || data.https === 'true');
+        }
+        proxy.options.target = TARGET;
+        log(`Config changée: target=${TARGET}, port=${PORT}, https=${USE_HTTPS}`);
+        res.writeHead(200); res.end('Configuration mise à jour (le port/https nécessite un redémarrage manuel)');
       });
       return;
     }
@@ -142,6 +147,34 @@ const requestHandler = (req, res) => {
       testReq.on('error', () => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false }));
+      });
+      return;
+    }
+    // API: proxy GET
+    if (parsedUrl.pathname === '/api/proxy' && req.method === 'GET') {
+      const query = querystring.parse(parsedUrl.query);
+      const targetUrl = query.url;
+      if (!targetUrl || !/^https?:\/\//.test(targetUrl)) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Paramètre url manquant ou invalide');
+        return;
+      }
+      log(`Web proxy fetch: ${targetUrl}`);
+      const client = targetUrl.startsWith('https') ? https : http;
+      const proxyReq = client.get(targetUrl, {
+        headers: {
+          'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0',
+          'Accept': req.headers['accept'] || '*/*',
+          'Accept-Language': req.headers['accept-language'] || 'fr-FR,fr;q=0.9',
+        }
+      }, (proxyRes) => {
+        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        proxyRes.pipe(res);
+      });
+      proxyReq.on('error', (err) => {
+        log(`Web proxy error: ${err}`);
+        res.writeHead(502, { 'Content-Type': 'text/plain' });
+        res.end('Erreur lors de la récupération de la ressource');
       });
       return;
     }
