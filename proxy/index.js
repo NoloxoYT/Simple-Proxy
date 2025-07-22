@@ -151,7 +151,7 @@ const requestHandler = (req, res) => {
       return;
     }
     // API: proxy GET
-    if (parsedUrl.pathname === '/api/proxy' && req.method === 'GET') {
+    if (parsedUrl.pathname === '/api/proxy') {
       const query = querystring.parse(parsedUrl.query);
       const targetUrl = query.url;
       if (!targetUrl || !/^https?:\/\//.test(targetUrl)) {
@@ -159,47 +159,28 @@ const requestHandler = (req, res) => {
         res.end('Paramètre url manquant ou invalide');
         return;
       }
-      log(`Web proxy fetch: ${targetUrl}`);
+      log(`Web proxy fetch: [${req.method}] ${targetUrl}`);
       const client = targetUrl.startsWith('https') ? https : http;
-      const proxyReq = client.get(targetUrl, {
-        headers: {
-          'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0',
-          'Accept': req.headers['accept'] || '*/*',
-          'Accept-Language': req.headers['accept-language'] || 'fr-FR,fr;q=0.9',
-        }
-      }, (proxyRes) => {
-        const contentType = proxyRes.headers['content-type'] || '';
-        if (contentType.includes('text/html')) {
-          let body = '';
-          proxyRes.on('data', chunk => { body += chunk; });
-          proxyRes.on('end', () => {
-            // Réécriture des liens dans le HTML
-            const baseUrl = targetUrl.replace(/\/[^/]*$/, '/');
-            const proxify = (url) => {
-              if (!url) return url;
-              if (url.startsWith('data:') || url.startsWith('javascript:') || url.startsWith('#')) return url;
-              if (url.startsWith('//')) return `/api/proxy?url=${encodeURIComponent('https:' + url)}`;
-              if (url.startsWith('http://') || url.startsWith('https://')) return `/api/proxy?url=${encodeURIComponent(url)}`;
-              // URL relative
-              let abs = url.startsWith('/') ? (new URL(targetUrl)).origin + url : baseUrl + url;
-              return `/api/proxy?url=${encodeURIComponent(abs)}`;
-            };
-            let html = body.replace(/(href|src|action)=(['"])(.*?)\2/gi, (m, attr, quote, link) => {
-              return `${attr}=${quote}${proxify(link)}${quote}`;
-            });
-            // Réécriture des liens dans les balises meta refresh
-            html = html.replace(/<meta[^>]+http-equiv=["']refresh["'][^>]+content=["']\d+;\s*url=([^"'>]+)["']/gi, (m, url) => {
-              return m.replace(url, proxify(url));
-            });
-            res.writeHead(proxyRes.statusCode, proxyRes.headers);
-            res.end(html);
-          });
-        } else {
-          // Pour les autres types de fichiers (css, js, images, etc.)
-          res.writeHead(proxyRes.statusCode, proxyRes.headers);
-          proxyRes.pipe(res);
-        }
-      });
+      // Préparer les headers à forwarder
+      const headers = { ...req.headers };
+      // Supprimer/adapter certains headers qui posent problème
+      delete headers['host'];
+      delete headers['referer'];
+      delete headers['origin'];
+      // Forwarder la méthode et le body
+      const options = {
+        method: req.method,
+        headers,
+      };
+      // Gérer le body pour POST/PUT
+      let proxyReq;
+      if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+        proxyReq = client.request(targetUrl, options, (proxyRes) => handleProxyResponse(proxyRes, res, targetUrl));
+        req.pipe(proxyReq);
+      } else {
+        proxyReq = client.request(targetUrl, options, (proxyRes) => handleProxyResponse(proxyRes, res, targetUrl));
+        req.pipe(proxyReq);
+      }
       proxyReq.on('error', (err) => {
         log(`Web proxy error: ${err}`);
         res.writeHead(502, { 'Content-Type': 'text/plain' });
@@ -220,6 +201,69 @@ const requestHandler = (req, res) => {
   res.writeHead(400, { 'Content-Type': 'text/plain' });
   res.end('Bad request: use as HTTP/HTTPS proxy');
 };
+
+function handleProxyResponse(proxyRes, res, targetUrl) {
+  let headers = { ...proxyRes.headers };
+  // Réécrire les redirects pour qu'ils passent par le proxy
+  if (headers['location']) {
+    headers['location'] = `/api/proxy?url=${encodeURIComponent(headers['location'].startsWith('http') ? headers['location'] : (new URL(headers['location'], targetUrl)).href)}`;
+  }
+  // Ajouter CORS
+  headers['access-control-allow-origin'] = '*';
+  // Gérer le HTML
+  const contentType = headers['content-type'] || '';
+  if (contentType.includes('text/html')) {
+    let body = '';
+    proxyRes.on('data', chunk => { body += chunk; });
+    proxyRes.on('end', () => {
+      // Réécriture avancée des liens
+      const baseUrl = targetUrl.replace(/\/[^/]*$/, '/');
+      const proxify = (url) => {
+        if (!url) return url;
+        if (url.startsWith('data:') || url.startsWith('javascript:') || url.startsWith('#') || url.startsWith('blob:')) return url;
+        if (url.startsWith('//')) return `/api/proxy?url=${encodeURIComponent('https:' + url)}`;
+        if (url.startsWith('http://') || url.startsWith('https://')) return `/api/proxy?url=${encodeURIComponent(url)}`;
+        // URL relative
+        let abs = url.startsWith('/') ? (new URL(targetUrl)).origin + url : baseUrl + url;
+        return `/api/proxy?url=${encodeURIComponent(abs)}`;
+      };
+      // href, src, action, srcset, formaction, poster, etc.
+      let html = body.replace(/(href|src|action|formaction|poster)=(['"])(.*?)\2/gi, (m, attr, quote, link) => {
+        return `${attr}=${quote}${proxify(link)}${quote}`;
+      });
+      // srcset (images multiples)
+      html = html.replace(/srcset=(['"])(.*?)\1/gi, (m, quote, set) => {
+        const proxified = set.split(',').map(part => {
+          const [url, size] = part.trim().split(' ');
+          return `${proxify(url)}${size ? ' ' + size : ''}`;
+        }).join(', ');
+        return `srcset=${quote}${proxified}${quote}`;
+      });
+      // meta refresh
+      html = html.replace(/<meta[^>]+http-equiv=["']refresh["'][^>]+content=["']\d+;\s*url=([^"'>]+)["']/gi, (m, url) => {
+        return m.replace(url, proxify(url));
+      });
+      // window.location, fetch, XHR dans le JS inline
+      html = html.replace(/(window\.location(?:\.href)?\s*=\s*['"])([^'"]+)(['"])/gi, (m, pre, link, post) => {
+        return `${pre}${proxify(link)}${post}`;
+      });
+      html = html.replace(/(fetch\(['"])([^'"]+)(['"])/gi, (m, pre, link, post) => {
+        return `${pre}${proxify(link)}${post}`;
+      });
+      html = html.replace(/(open\(['"])([^'"]+)(['"])/gi, (m, pre, link, post) => {
+        return `${pre}${proxify(link)}${post}`;
+      });
+      // Ajout d'un script pour forcer la navigation via le proxy
+      html = html.replace('</head>', `<script>document.addEventListener('click',function(e){let t=e.target.closest('a');if(t&&t.href&&!t.href.startsWith('/api/proxy?url=')){e.preventDefault();window.location='/api/proxy?url='+encodeURIComponent(t.href);}});</script></head>`);
+      res.writeHead(proxyRes.statusCode, headers);
+      res.end(html);
+    });
+  } else {
+    // Pour les autres types de fichiers (css, js, images, wasm, etc.)
+    res.writeHead(proxyRes.statusCode, headers);
+    proxyRes.pipe(res);
+  }
+}
 
 let server;
 if (USE_HTTPS) {
