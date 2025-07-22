@@ -7,6 +7,7 @@ const querystring = require('querystring');
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
+const zlib = require('zlib');
 
 let logs = [];
 function log(msg) {
@@ -212,51 +213,66 @@ function handleProxyResponse(proxyRes, res, targetUrl) {
   headers['access-control-allow-origin'] = '*';
   // Gérer le HTML
   const contentType = headers['content-type'] || '';
+  const encoding = headers['content-encoding'] || '';
   if (contentType.includes('text/html')) {
-    let body = '';
-    proxyRes.on('data', chunk => { body += chunk; });
+    let chunks = [];
+    proxyRes.on('data', chunk => { chunks.push(chunk); });
     proxyRes.on('end', () => {
-      // Réécriture avancée des liens
-      const baseUrl = targetUrl.replace(/\/[^/]*$/, '/');
-      const proxify = (url) => {
-        if (!url) return url;
-        if (url.startsWith('data:') || url.startsWith('javascript:') || url.startsWith('#') || url.startsWith('blob:')) return url;
-        if (url.startsWith('//')) return `/api/proxy?url=${encodeURIComponent('https:' + url)}`;
-        if (url.startsWith('http://') || url.startsWith('https://')) return `/api/proxy?url=${encodeURIComponent(url)}`;
-        // URL relative
-        let abs = url.startsWith('/') ? (new URL(targetUrl)).origin + url : baseUrl + url;
-        return `/api/proxy?url=${encodeURIComponent(abs)}`;
+      let buffer = Buffer.concat(chunks);
+      // Décompresser si besoin
+      const decompress = (buf, cb) => {
+        if (encoding === 'gzip') zlib.gunzip(buf, cb);
+        else if (encoding === 'br') zlib.brotliDecompress(buf, cb);
+        else if (encoding === 'deflate') zlib.inflate(buf, cb);
+        else cb(null, buf);
       };
-      // href, src, action, srcset, formaction, poster, etc.
-      let html = body.replace(/(href|src|action|formaction|poster)=(['"])(.*?)\2/gi, (m, attr, quote, link) => {
-        return `${attr}=${quote}${proxify(link)}${quote}`;
+      decompress(buffer, (err, rawHtml) => {
+        if (err) {
+          res.writeHead(502, headers);
+          res.end('Erreur de décompression');
+          return;
+        }
+        // Réécriture avancée des liens
+        const baseUrl = targetUrl.replace(/\/[^/]*$/, '/');
+        const proxify = (url) => {
+          if (!url) return url;
+          if (url.startsWith('data:') || url.startsWith('javascript:') || url.startsWith('#') || url.startsWith('blob:')) return url;
+          if (url.startsWith('//')) return `/api/proxy?url=${encodeURIComponent('https:' + url)}`;
+          if (url.startsWith('http://') || url.startsWith('https://')) return `/api/proxy?url=${encodeURIComponent(url)}`;
+          // URL relative
+          let abs = url.startsWith('/') ? (new URL(targetUrl)).origin + url : baseUrl + url;
+          return `/api/proxy?url=${encodeURIComponent(abs)}`;
+        };
+        let html = rawHtml.toString('utf8');
+        html = html.replace(/(href|src|action|formaction|poster)=(['"])(.*?)\2/gi, (m, attr, quote, link) => {
+          return `${attr}=${quote}${proxify(link)}${quote}`;
+        });
+        html = html.replace(/srcset=(['"])(.*?)\1/gi, (m, quote, set) => {
+          const proxified = set.split(',').map(part => {
+            const [url, size] = part.trim().split(' ');
+            return `${proxify(url)}${size ? ' ' + size : ''}`;
+          }).join(', ');
+          return `srcset=${quote}${proxified}${quote}`;
+        });
+        html = html.replace(/<meta[^>]+http-equiv=["']refresh["'][^>]+content=["']\d+;\s*url=([^"'>]+)["']/gi, (m, url) => {
+          return m.replace(url, proxify(url));
+        });
+        html = html.replace(/(window\.location(?:\.href)?\s*=\s*['"])([^'"]+)(['"])/gi, (m, pre, link, post) => {
+          return `${pre}${proxify(link)}${post}`;
+        });
+        html = html.replace(/(fetch\(['"])([^'"]+)(['"])/gi, (m, pre, link, post) => {
+          return `${pre}${proxify(link)}${post}`;
+        });
+        html = html.replace(/(open\(['"])([^'"]+)(['"])/gi, (m, pre, link, post) => {
+          return `${pre}${proxify(link)}${post}`;
+        });
+        html = html.replace('</head>', `<script>document.addEventListener('click',function(e){let t=e.target.closest('a');if(t&&t.href&&!t.href.startsWith('/api/proxy?url=')){e.preventDefault();window.location='/api/proxy?url='+encodeURIComponent(t.href);}});</script></head>`);
+        // On renvoie du HTML non compressé
+        delete headers['content-encoding'];
+        headers['content-length'] = Buffer.byteLength(html);
+        res.writeHead(proxyRes.statusCode, headers);
+        res.end(html);
       });
-      // srcset (images multiples)
-      html = html.replace(/srcset=(['"])(.*?)\1/gi, (m, quote, set) => {
-        const proxified = set.split(',').map(part => {
-          const [url, size] = part.trim().split(' ');
-          return `${proxify(url)}${size ? ' ' + size : ''}`;
-        }).join(', ');
-        return `srcset=${quote}${proxified}${quote}`;
-      });
-      // meta refresh
-      html = html.replace(/<meta[^>]+http-equiv=["']refresh["'][^>]+content=["']\d+;\s*url=([^"'>]+)["']/gi, (m, url) => {
-        return m.replace(url, proxify(url));
-      });
-      // window.location, fetch, XHR dans le JS inline
-      html = html.replace(/(window\.location(?:\.href)?\s*=\s*['"])([^'"]+)(['"])/gi, (m, pre, link, post) => {
-        return `${pre}${proxify(link)}${post}`;
-      });
-      html = html.replace(/(fetch\(['"])([^'"]+)(['"])/gi, (m, pre, link, post) => {
-        return `${pre}${proxify(link)}${post}`;
-      });
-      html = html.replace(/(open\(['"])([^'"]+)(['"])/gi, (m, pre, link, post) => {
-        return `${pre}${proxify(link)}${post}`;
-      });
-      // Ajout d'un script pour forcer la navigation via le proxy
-      html = html.replace('</head>', `<script>document.addEventListener('click',function(e){let t=e.target.closest('a');if(t&&t.href&&!t.href.startsWith('/api/proxy?url=')){e.preventDefault();window.location='/api/proxy?url='+encodeURIComponent(t.href);}});</script></head>`);
-      res.writeHead(proxyRes.statusCode, headers);
-      res.end(html);
     });
   } else {
     // Pour les autres types de fichiers (css, js, images, wasm, etc.)
