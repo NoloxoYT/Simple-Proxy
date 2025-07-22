@@ -232,18 +232,25 @@ function handleProxyResponse(proxyRes, res, targetUrl) {
           res.end('Erreur de décompression');
           return;
         }
-        // Réécriture avancée des liens
         const baseUrl = targetUrl.replace(/\/[^/]*$/, '/');
+        const alreadyProxied = url => url.startsWith('/api/proxy?url=');
+        const safeEncode = url => {
+          try {
+            return encodeURIComponent(decodeURIComponent(url));
+          } catch { return encodeURIComponent(url); }
+        };
         const proxify = (url) => {
           if (!url) return url;
+          if (alreadyProxied(url)) return url;
           if (url.startsWith('data:') || url.startsWith('javascript:') || url.startsWith('#') || url.startsWith('blob:')) return url;
-          if (url.startsWith('//')) return `/api/proxy?url=${encodeURIComponent('https:' + url)}`;
-          if (url.startsWith('http://') || url.startsWith('https://')) return `/api/proxy?url=${encodeURIComponent(url)}`;
+          if (url.startsWith('//')) return `/api/proxy?url=${safeEncode('https:' + url)}`;
+          if (url.startsWith('http://') || url.startsWith('https://')) return `/api/proxy?url=${safeEncode(url)}`;
           // URL relative
           let abs = url.startsWith('/') ? (new URL(targetUrl)).origin + url : baseUrl + url;
-          return `/api/proxy?url=${encodeURIComponent(abs)}`;
+          return `/api/proxy?url=${safeEncode(abs)}`;
         };
         let html = rawHtml.toString('utf8');
+        // Réécriture des liens HTML
         html = html.replace(/(href|src|action|formaction|poster)=(['"])(.*?)\2/gi, (m, attr, quote, link) => {
           return `${attr}=${quote}${proxify(link)}${quote}`;
         });
@@ -257,6 +264,7 @@ function handleProxyResponse(proxyRes, res, targetUrl) {
         html = html.replace(/<meta[^>]+http-equiv=["']refresh["'][^>]+content=["']\d+;\s*url=([^"'>]+)["']/gi, (m, url) => {
           return m.replace(url, proxify(url));
         });
+        // Réécriture JS inline (window.location, fetch, open, XHR)
         html = html.replace(/(window\.location(?:\.href)?\s*=\s*['"])([^'"]+)(['"])/gi, (m, pre, link, post) => {
           return `${pre}${proxify(link)}${post}`;
         });
@@ -266,7 +274,23 @@ function handleProxyResponse(proxyRes, res, targetUrl) {
         html = html.replace(/(open\(['"])([^'"]+)(['"])/gi, (m, pre, link, post) => {
           return `${pre}${proxify(link)}${post}`;
         });
-        html = html.replace('</head>', `<script>document.addEventListener('click',function(e){let t=e.target.closest('a');if(t&&t.href&&!t.href.startsWith('/api/proxy?url=')){e.preventDefault();window.location='/api/proxy?url='+encodeURIComponent(t.href);}});</script></head>`);
+        // Injection d'un script JS pour forcer tout à passer par le proxy
+        html = html.replace('</head>', `<script>(function(){
+// Intercepte tous les liens cliqués
+  document.addEventListener('click',function(e){
+    let t=e.target.closest('a');
+    if(t&&t.href&&!t.href.startsWith('/api/proxy?url=')){
+      e.preventDefault();
+      window.location='/api/proxy?url='+encodeURIComponent(t.href);
+    }
+  });
+// Intercepte window.open
+  const origOpen=window.open;window.open=function(u,...a){if(u&&!u.startsWith('/api/proxy?url=')){return origOpen('/api/proxy?url='+encodeURIComponent(u),...a);}return origOpen(u,...a);};
+// Intercepte fetch
+  const origFetch=window.fetch;window.fetch=function(u,...a){if(typeof u==='string'&&!u.startsWith('/api/proxy?url=')){return origFetch('/api/proxy?url='+encodeURIComponent(u),...a);}return origFetch(u,...a);};
+// Intercepte XHR
+  const origXHR=window.XMLHttpRequest;window.XMLHttpRequest=function(){const x=new origXHR();const origOpen=x.open;x.open=function(m,u,...a){if(typeof u==='string'&&!u.startsWith('/api/proxy?url=')){return origOpen.call(x,m,'/api/proxy?url='+encodeURIComponent(u),...a);}return origOpen.call(x,m,u,...a);};return x;};
+})();</script></head>`);
         // On renvoie du HTML non compressé
         delete headers['content-encoding'];
         headers['content-length'] = Buffer.byteLength(html);
