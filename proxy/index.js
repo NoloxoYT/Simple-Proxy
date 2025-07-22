@@ -212,22 +212,37 @@ const requestHandler = (req, res) => {
   res.end('Bad request: use as HTTP/HTTPS proxy');
 };
 
+function cleanUtm(url) {
+  try {
+    let u = new URL(url);
+    u.searchParams.delete('utm_source');
+    u.searchParams.delete('utm_medium');
+    u.searchParams.delete('utm_campaign');
+    u.searchParams.delete('utm_term');
+    u.searchParams.delete('utm_content');
+    return u.toString();
+  } catch { return url; }
+}
+
 function handleProxyResponse(proxyRes, res, targetUrl) {
   let headers = { ...proxyRes.headers };
-  // Réécrire les redirects pour qu'ils passent par le proxy
+  // Réécrire les redirects pour qu'ils passent par le proxy et nettoyer les utm
   if (headers['location']) {
-    headers['location'] = `/api/proxy?url=${encodeURIComponent(headers['location'].startsWith('http') ? headers['location'] : (new URL(headers['location'], targetUrl)).href)}`;
+    let loc = headers['location'].startsWith('http') ? headers['location'] : (new URL(headers['location'], targetUrl)).href;
+    loc = cleanUtm(loc);
+    headers['location'] = `/api/proxy?url=${encodeURIComponent(loc)}`;
   }
   // Ajouter CORS sur tout
   headers['access-control-allow-origin'] = '*';
+  // Forcer Referer et Origin à pointer vers le site cible
+  headers['referer'] = targetUrl;
+  headers['origin'] = (new URL(targetUrl)).origin;
   // Gérer le HTML
   const contentType = headers['content-type'] || '';
   const encoding = headers['content-encoding'] || '';
   // Si c'est une police (woff, woff2, ttf, otf, font/...)
   if (/font|woff|woff2|ttf|otf/i.test(contentType) || /\.(woff2?|ttf|otf)(\?|$)/i.test(targetUrl)) {
-    // Logger pour debug
     log('Réponse font : ' + targetUrl + ' headers=' + JSON.stringify(headers));
-    // Forwarder tous les headers + CORS
     headers['access-control-allow-origin'] = '*';
     res.writeHead(proxyRes.statusCode, headers);
     proxyRes.pipe(res);
@@ -238,7 +253,6 @@ function handleProxyResponse(proxyRes, res, targetUrl) {
     proxyRes.on('data', chunk => { chunks.push(chunk); });
     proxyRes.on('end', () => {
       let buffer = Buffer.concat(chunks);
-      // Décompresser si besoin
       const decompress = (buf, cb) => {
         if (encoding === 'gzip') zlib.gunzip(buf, cb);
         else if (encoding === 'br') zlib.brotliDecompress(buf, cb);
@@ -262,14 +276,12 @@ function handleProxyResponse(proxyRes, res, targetUrl) {
           if (!url) return url;
           if (alreadyProxied(url)) return url;
           if (url.startsWith('data:') || url.startsWith('javascript:') || url.startsWith('#') || url.startsWith('blob:')) return url;
-          if (url.startsWith('//')) return `/api/proxy?url=${safeEncode('https:' + url)}`;
-          if (url.startsWith('http://') || url.startsWith('https://')) return `/api/proxy?url=${safeEncode(url)}`;
-          // URL relative
+          if (url.startsWith('//')) return `/api/proxy?url=${safeEncode(cleanUtm('https:' + url))}`;
+          if (url.startsWith('http://') || url.startsWith('https://')) return `/api/proxy?url=${safeEncode(cleanUtm(url))}`;
           let abs = url.startsWith('/') ? (new URL(targetUrl)).origin + url : baseUrl + url;
-          return `/api/proxy?url=${safeEncode(abs)}`;
+          return `/api/proxy?url=${safeEncode(cleanUtm(abs))}`;
         };
         let html = rawHtml.toString('utf8');
-        // Réécriture des liens HTML
         html = html.replace(/(href|src|action|formaction|poster)=(['"])(.*?)\2/gi, (m, attr, quote, link) => {
           return `${attr}=${quote}${proxify(link)}${quote}`;
         });
@@ -283,7 +295,6 @@ function handleProxyResponse(proxyRes, res, targetUrl) {
         html = html.replace(/<meta[^>]+http-equiv=["']refresh["'][^>]+content=["']\d+;\s*url=([^"'>]+)["']/gi, (m, url) => {
           return m.replace(url, proxify(url));
         });
-        // Réécriture JS inline (window.location, fetch, open, XHR)
         html = html.replace(/(window\.location(?:\.href)?\s*=\s*['"])([^'"]+)(['"])/gi, (m, pre, link, post) => {
           return `${pre}${proxify(link)}${post}`;
         });
@@ -293,7 +304,7 @@ function handleProxyResponse(proxyRes, res, targetUrl) {
         html = html.replace(/(open\(['"])([^'"]+)(['"])/gi, (m, pre, link, post) => {
           return `${pre}${proxify(link)}${post}`;
         });
-        // Injection d'un script JS pour forcer tout à passer par le proxy
+        // Injection JS renforcée
         html = html.replace('</head>', `<script>(function(){
 // Intercepte tous les liens cliqués
   document.addEventListener('click',function(e){
@@ -309,19 +320,27 @@ function handleProxyResponse(proxyRes, res, targetUrl) {
   const origFetch=window.fetch;window.fetch=function(u,...a){if(typeof u==='string'&&!u.startsWith('/api/proxy?url=')){return origFetch('/api/proxy?url='+encodeURIComponent(u),...a);}return origFetch(u,...a);};
 // Intercepte XHR
   const origXHR=window.XMLHttpRequest;window.XMLHttpRequest=function(){const x=new origXHR();const origOpen=x.open;x.open=function(m,u,...a){if(typeof u==='string'&&!u.startsWith('/api/proxy?url=')){return origOpen.call(x,m,'/api/proxy?url='+encodeURIComponent(u),...a);}return origOpen.call(x,m,u,...a);};return x;};
+// Intercepte pushState/replaceState
+  const origPush=history.pushState;history.pushState=function(s,t,u){if(typeof u==='string'&&!u.startsWith('/api/proxy?url=')){return origPush.call(history,s,t,'/api/proxy?url='+encodeURIComponent(u));}return origPush.call(history,s,t,u);};
+  const origReplace=history.replaceState;history.replaceState=function(s,t,u){if(typeof u==='string'&&!u.startsWith('/api/proxy?url=')){return origReplace.call(history,s,t,'/api/proxy?url='+encodeURIComponent(u));}return origReplace.call(history,s,t,u);};
+// Bloque l'enregistrement des Service Workers
+  if(navigator.serviceWorker){navigator.serviceWorker.register=function(){return Promise.reject('Proxy: ServiceWorker disabled');};}
+// MutationObserver pour réécrire les nouveaux liens/iframes dynamiquement
+  const proxifyAttr=(el,attr)=>{if(el&&el[attr]&&!el[attr].startsWith('/api/proxy?url=')&&!el[attr].startsWith('data:')&&!el[attr].startsWith('javascript:'))el[attr]='/api/proxy?url='+encodeURIComponent(el[attr]);};
+  const mo=new MutationObserver(ms=>{ms.forEach(m=>{m.addedNodes&&m.addedNodes.forEach(n=>{if(n.nodeType===1){['href','src','action','formaction','poster'].forEach(attr=>proxifyAttr(n,attr));if(n.tagName==='IFRAME'){proxifyAttr(n,'src');}}});});});
+  mo.observe(document.documentElement,{childList:true,subtree:true});
 })();</script></head>`);
-        // On renvoie du HTML non compressé
         delete headers['content-encoding'];
         headers['content-length'] = Buffer.byteLength(html);
         res.writeHead(proxyRes.statusCode, headers);
         res.end(html);
       });
     });
-  } else {
-    // Pour les autres types de fichiers (css, js, images, wasm, etc.)
-    res.writeHead(proxyRes.statusCode, headers);
-    proxyRes.pipe(res);
+    return;
   }
+  // Pour les autres types de fichiers (css, js, images, wasm, etc.)
+  res.writeHead(proxyRes.statusCode, headers);
+  proxyRes.pipe(res);
 }
 
 let server;
