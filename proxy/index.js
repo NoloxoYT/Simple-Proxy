@@ -154,26 +154,30 @@ const requestHandler = (req, res) => {
     // API: proxy GET
     if (parsedUrl.pathname === '/api/proxy') {
       const query = querystring.parse(parsedUrl.query);
-      const targetUrl = query.url;
+      let targetUrl = query.url;
       if (!targetUrl || !/^https?:\/\//.test(targetUrl)) {
         res.writeHead(400, { 'Content-Type': 'text/plain' });
         res.end('Paramètre url manquant ou invalide');
         return;
       }
+      // Corriger le double encodage
+      try {
+        while (decodeURIComponent(targetUrl) !== targetUrl) {
+          targetUrl = decodeURIComponent(targetUrl);
+        }
+      } catch {}
       log(`Web proxy fetch: [${req.method}] ${targetUrl}`);
       const client = targetUrl.startsWith('https') ? https : http;
-      // Préparer les headers à forwarder
+      // Forwarder tous les headers sauf 'host'
       const headers = { ...req.headers };
-      // Supprimer/adapter certains headers qui posent problème
       delete headers['host'];
-      delete headers['referer'];
-      delete headers['origin'];
+      // Logger les headers envoyés
+      log('Headers envoyés: ' + JSON.stringify(headers));
       // Forwarder la méthode et le body
       const options = {
         method: req.method,
         headers,
       };
-      // Gérer le body pour POST/PUT
       let proxyReq;
       if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
         proxyReq = client.request(targetUrl, options, (proxyRes) => handleProxyResponse(proxyRes, res, targetUrl));
@@ -182,6 +186,11 @@ const requestHandler = (req, res) => {
         proxyReq = client.request(targetUrl, options, (proxyRes) => handleProxyResponse(proxyRes, res, targetUrl));
         req.pipe(proxyReq);
       }
+      proxyReq.on('response', (proxyRes) => {
+        if (proxyRes.statusCode === 400) {
+          log(`Erreur 400 sur ${targetUrl} avec headers: ${JSON.stringify(headers)}`);
+        }
+      });
       proxyReq.on('error', (err) => {
         log(`Web proxy error: ${err}`);
         res.writeHead(502, { 'Content-Type': 'text/plain' });
@@ -209,11 +218,21 @@ function handleProxyResponse(proxyRes, res, targetUrl) {
   if (headers['location']) {
     headers['location'] = `/api/proxy?url=${encodeURIComponent(headers['location'].startsWith('http') ? headers['location'] : (new URL(headers['location'], targetUrl)).href)}`;
   }
-  // Ajouter CORS
+  // Ajouter CORS sur tout
   headers['access-control-allow-origin'] = '*';
   // Gérer le HTML
   const contentType = headers['content-type'] || '';
   const encoding = headers['content-encoding'] || '';
+  // Si c'est une police (woff, woff2, ttf, otf, font/...)
+  if (/font|woff|woff2|ttf|otf/i.test(contentType) || /\.(woff2?|ttf|otf)(\?|$)/i.test(targetUrl)) {
+    // Logger pour debug
+    log('Réponse font : ' + targetUrl + ' headers=' + JSON.stringify(headers));
+    // Forwarder tous les headers + CORS
+    headers['access-control-allow-origin'] = '*';
+    res.writeHead(proxyRes.statusCode, headers);
+    proxyRes.pipe(res);
+    return;
+  }
   if (contentType.includes('text/html')) {
     let chunks = [];
     proxyRes.on('data', chunk => { chunks.push(chunk); });
