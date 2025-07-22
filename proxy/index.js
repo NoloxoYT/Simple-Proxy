@@ -168,8 +168,37 @@ const requestHandler = (req, res) => {
           'Accept-Language': req.headers['accept-language'] || 'fr-FR,fr;q=0.9',
         }
       }, (proxyRes) => {
-        res.writeHead(proxyRes.statusCode, proxyRes.headers);
-        proxyRes.pipe(res);
+        const contentType = proxyRes.headers['content-type'] || '';
+        if (contentType.includes('text/html')) {
+          let body = '';
+          proxyRes.on('data', chunk => { body += chunk; });
+          proxyRes.on('end', () => {
+            // Réécriture des liens dans le HTML
+            const baseUrl = targetUrl.replace(/\/[^/]*$/, '/');
+            const proxify = (url) => {
+              if (!url) return url;
+              if (url.startsWith('data:') || url.startsWith('javascript:') || url.startsWith('#')) return url;
+              if (url.startsWith('//')) return `/api/proxy?url=${encodeURIComponent('https:' + url)}`;
+              if (url.startsWith('http://') || url.startsWith('https://')) return `/api/proxy?url=${encodeURIComponent(url)}`;
+              // URL relative
+              let abs = url.startsWith('/') ? (new URL(targetUrl)).origin + url : baseUrl + url;
+              return `/api/proxy?url=${encodeURIComponent(abs)}`;
+            };
+            let html = body.replace(/(href|src|action)=(['"])(.*?)\2/gi, (m, attr, quote, link) => {
+              return `${attr}=${quote}${proxify(link)}${quote}`;
+            });
+            // Réécriture des liens dans les balises meta refresh
+            html = html.replace(/<meta[^>]+http-equiv=["']refresh["'][^>]+content=["']\d+;\s*url=([^"'>]+)["']/gi, (m, url) => {
+              return m.replace(url, proxify(url));
+            });
+            res.writeHead(proxyRes.statusCode, proxyRes.headers);
+            res.end(html);
+          });
+        } else {
+          // Pour les autres types de fichiers (css, js, images, etc.)
+          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          proxyRes.pipe(res);
+        }
       });
       proxyReq.on('error', (err) => {
         log(`Web proxy error: ${err}`);
